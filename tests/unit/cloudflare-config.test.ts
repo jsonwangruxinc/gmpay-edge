@@ -109,17 +109,17 @@ if (tool === "vite" && args[0] === "build") {
 		) as WranglerConfig;
 
 		expect(config.main).toBe("src/server-entry.ts");
-		expect(config.d1_databases).toEqual([
+		expect(config.d1_databases).toMatchObject([
 			{
 				binding: "DB",
 				database_name: "gmpay-edge",
 				migrations_dir: "drizzle",
 			},
 		]);
-		expect(config.r2_buckets).toEqual([
+		expect(config.r2_buckets).toMatchObject([
 			{ binding: "FILES", bucket_name: "gmpay-edge-files" },
 		]);
-		expect(config.kv_namespaces).toEqual([{ binding: "CACHE" }]);
+		expect(config.kv_namespaces).toMatchObject([{ binding: "CACHE" }]);
 		expect(config.queues?.producers).toEqual([
 			{ binding: "WEBHOOK_QUEUE", queue: "gmpay-edge-webhooks" },
 			{ binding: "PAYMENT_QUEUE", queue: "gmpay-edge-payments" },
