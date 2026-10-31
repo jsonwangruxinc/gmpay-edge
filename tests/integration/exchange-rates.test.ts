@@ -12,6 +12,7 @@ import {
 	fetchCryptoRateQuotes,
 	fetchExchangeRateQuote,
 	fetchFiatRates,
+	fetchFrankfurterRates,
 	refreshExchangeRates,
 	saveRateSyncConfiguration,
 } from "#/features/payment-settings/server/exchange-rates";
@@ -317,6 +318,85 @@ describe("exchange-rate refresh", () => {
 		const requestedUrl = new URL(String(request.mock.calls[0]?.[0]));
 		expect(requestedUrl.searchParams.get("currencies")).toBeNull();
 		expect(requestedUrl.searchParams.get("source")).toBeNull();
+	});
+
+	it("accepts recent Frankfurter USD rates without a credential and rejects stale data", async () => {
+		const now = Date.UTC(2026, 9, 31, 12);
+		const request = vi.fn((_input: string) =>
+			Promise.resolve(
+				Response.json([
+					{ date: "2026-10-31", base: "USD", quote: "CNY", rate: 6.6578 },
+					{ date: "2026-10-20", base: "USD", quote: "EUR", rate: 0.9 },
+				]),
+			),
+		);
+		await expect(fetchFrankfurterRates(request, now)).resolves.toEqual({
+			CNY: "6.6578",
+		});
+		expect(request.mock.calls[0]?.[0]).toBe(
+			"https://api.frankfurter.dev/v2/rates?base=USD",
+		);
+		await expect(
+			fetchFrankfurterRates(request, Date.UTC(2026, 10, 10)),
+		).rejects.toThrow("no recent rates");
+	});
+
+	it("synchronizes Frankfurter fiat rates with no API key", async () => {
+		const now = Date.UTC(2026, 9, 31, 12);
+		await saveRateSyncConfiguration(
+			db,
+			"fiat",
+			{
+				enabled: true,
+				provider: "frankfurter",
+				intervalMs: 86_400_000,
+				adjustmentBps: 0,
+				credentials: { apiKey: "" },
+				lastSyncedAt: null,
+			},
+			null,
+			now,
+		);
+		const request = vi.fn(() =>
+			Promise.resolve(
+				Response.json([
+					{ date: "2026-10-31", base: "USD", quote: "CNY", rate: 6.6578 },
+				]),
+			),
+		);
+		await expect(
+			refreshExchangeRates(db, request, now, { category: "fiat" }),
+		).resolves.toMatchObject({ updated: 1, failed: 0 });
+		const row = await db
+			.prepare(
+				"SELECT raw_rate, rate, source, observed_at FROM exchange_rates WHERE base = 'USD' AND quote = 'CNY'",
+			)
+			.first<{
+				raw_rate: string;
+				rate: string;
+				source: string;
+				observed_at: number;
+			}>();
+		expect(row).toEqual({
+			raw_rate: "6.6578",
+			rate: "6.6578",
+			source: "frankfurter",
+			observed_at: now,
+		});
+		await saveRateSyncConfiguration(
+			db,
+			"fiat",
+			{
+				enabled: true,
+				provider: "exchangerate_host",
+				intervalMs: 86_400_000,
+				adjustmentBps: 0,
+				credentials: { apiKey: "" },
+				lastSyncedAt: null,
+			},
+			null,
+			now,
+		);
 	});
 
 	it("persists every valid fiat quote returned by the provider", async () => {
