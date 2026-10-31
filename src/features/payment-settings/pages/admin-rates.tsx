@@ -222,7 +222,10 @@ function RateSyncSettingsForm({
 										{ label: "Binance", value: "binance" },
 										{ label: "OKX", value: "okx" },
 									]
-								: [{ label: "exchangerate.host", value: "exchangerate_host" }],
+								: [
+										{ label: "exchangerate.host", value: "exchangerate_host" },
+										{ label: "Frankfurter", value: "frankfurter" },
+									],
 					},
 				},
 				{
@@ -230,9 +233,7 @@ function RateSyncSettingsForm({
 					label: m.api_key_secret(),
 					valueType: "password",
 					hidden: category !== "fiat",
-					required:
-						category === "fiat" &&
-						!(settings?.category === "fiat" && settings.hasCredentials),
+					required: false,
 					description:
 						settings?.category === "fiat" && settings.hasCredentials
 							? m.settings_secret_configured()
@@ -293,7 +294,9 @@ function RateSyncSettingsForm({
 					await onSave({
 						category,
 						enabled,
-						provider: "exchangerate_host",
+						provider: String(values.provider ?? "exchangerate_host") as
+							| "exchangerate_host"
+							| "frankfurter",
 						intervalMs: Number(values.intervalValue ?? 86_400) * 1_000,
 						adjustmentBps: Number(values.adjustmentBps ?? 0),
 						apiKey: String(values.apiKey ?? "").trim() || undefined,

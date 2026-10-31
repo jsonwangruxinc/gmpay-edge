@@ -38,6 +38,14 @@ const fiatRatesSchema = z.looseObject({
 		})
 		.optional(),
 });
+const frankfurterRatesSchema = z.array(
+	z.object({
+		date: z.iso.date(),
+		base: z.literal("USD"),
+		quote: z.string().regex(/^[A-Z]{3}$/),
+		rate: z.number().positive(),
+	}),
+);
 
 class ExchangeRateProviderError extends Error {
 	readonly failureCode: `http_${number}` | "provider_error";
@@ -59,7 +67,7 @@ export type CryptoRateSyncConfiguration = {
 };
 export type FiatRateSyncConfiguration = {
 	enabled: boolean;
-	provider: "exchangerate_host";
+	provider: "exchangerate_host" | "frankfurter";
 	intervalMs: number;
 	adjustmentBps: number;
 	credentials: { apiKey: string };
@@ -162,7 +170,8 @@ export function parseRateSyncConfiguration(
 				: {};
 		return {
 			enabled: record.enabled === true,
-			provider: "exchangerate_host",
+			provider:
+				record.provider === "frankfurter" ? "frankfurter" : "exchangerate_host",
 			intervalMs,
 			adjustmentBps: validAdjustmentBps(record.adjustmentBps),
 			credentials: {
@@ -297,7 +306,8 @@ export async function refreshRateCategoryIfDue(
 		(await loadRateSyncConfiguration(db, "fiat"));
 	if (
 		!fiatConfiguration.enabled ||
-		!fiatConfiguration.credentials.apiKey ||
+		(fiatConfiguration.provider === "exchangerate_host" &&
+			!fiatConfiguration.credentials.apiKey) ||
 		(fiatConfiguration.lastSyncedAt !== null &&
 			now - fiatConfiguration.lastSyncedAt < fiatConfiguration.intervalMs)
 	)
@@ -360,7 +370,7 @@ export async function refreshExchangeRates(
 	const allFailures: Array<{
 		id: string;
 		pair: string;
-		source: "binance" | "okx" | "exchangerate_host";
+		source: "binance" | "okx" | "exchangerate_host" | "frankfurter";
 		code: string;
 	}> = [];
 	if (category === "crypto") {
@@ -430,26 +440,29 @@ export async function refreshExchangeRates(
 			);
 		}
 	} else {
+		const fiatProvider = fiatConfiguration?.provider ?? "exchangerate_host";
 		try {
 			const apiKey =
 				context.apiKey ?? fiatConfiguration?.credentials.apiKey ?? null;
-			if (!apiKey)
+			if (fiatProvider === "exchangerate_host" && !apiKey)
 				throw new Error("exchangerate_host API Key is not configured");
 			const rates = await observeProviderOperation(
 				{
-					adapter: "exchangerate_host",
+					adapter: fiatProvider,
 					operation: "sync_fiat_rates",
 					classifyError: classifyExchangeRateError,
 				},
 				(counters) => {
 					counters.request();
-					return fetchFiatRates(
-						"USD",
-						[],
-						request,
-						"https://api.exchangerate.host",
-						apiKey,
-					);
+					return fiatProvider === "frankfurter"
+						? fetchFrankfurterRates(request, now)
+						: fetchFiatRates(
+								"USD",
+								[],
+								request,
+								"https://api.exchangerate.host",
+								apiKey,
+							);
 				},
 			);
 			const snapshots = Object.entries(rates)
@@ -462,7 +475,7 @@ export async function refreshExchangeRates(
 							`INSERT INTO exchange_rates
 							 (id, category, base, quote, raw_rate, rate, source, adjustment_bps,
 							  observed_at, expires_at, created_at, updated_at)
-							 VALUES (?, 'fiat', 'USD', ?, ?, ?, 'exchangerate_host', ?, ?, ?, ?, ?)
+							 VALUES (?, 'fiat', 'USD', ?, ?, ?, ?, ?, ?, ?, ?, ?)
 							 ON CONFLICT(category, base, quote) DO UPDATE SET
 							 raw_rate = excluded.raw_rate, rate = excluded.rate,
 							 source = excluded.source, adjustment_bps = excluded.adjustment_bps,
@@ -477,6 +490,7 @@ export async function refreshExchangeRates(
 								snapshot.rawRate,
 								fiatConfiguration?.adjustmentBps ?? 0,
 							),
+							fiatProvider,
 							fiatConfiguration?.adjustmentBps ?? 0,
 							now,
 							now + 24 * 60 * 60_000,
@@ -494,7 +508,7 @@ export async function refreshExchangeRates(
 			allFailures.push({
 				id: "fiat",
 				pair: "USD/fiat",
-				source: "exchangerate_host",
+				source: fiatProvider,
 				code: exchangeRateErrorCode(error),
 			});
 		}
@@ -668,6 +682,39 @@ export async function fetchFiatRates(
 	return Object.fromEntries(
 		entries.map(([quote, rate]) => [quote.toUpperCase(), String(rate)]),
 	);
+}
+
+export async function fetchFrankfurterRates(
+	request: (input: string, init?: RequestInit) => Promise<Response> = fetch as (
+		input: string,
+		init?: RequestInit,
+	) => Promise<Response>,
+	now = Date.now(),
+) {
+	const response = await request(
+		"https://api.frankfurter.dev/v2/rates?base=USD",
+		{
+			headers: { accept: "application/json" },
+			signal: AbortSignal.timeout(8_000),
+		},
+	);
+	if (!response.ok)
+		throw new ExchangeRateProviderError(
+			`frankfurter returned HTTP ${response.status}`,
+			response.status,
+		);
+	const rates = frankfurterRatesSchema.parse(await response.json());
+	const freshRates = Object.fromEntries(
+		rates
+			.filter(({ date }) => {
+				const ageMs = now - Date.parse(`${date}T00:00:00Z`);
+				return ageMs >= 0 && ageMs < 7 * 86_400_000;
+			})
+			.map(({ quote, rate }) => [quote, String(rate)]),
+	);
+	if (Object.keys(freshRates).length === 0)
+		throw new ExchangeRateProviderError("frankfurter returned no recent rates");
+	return freshRates;
 }
 
 function defaultRateSourceUrl(source: "binance" | "okx") {
